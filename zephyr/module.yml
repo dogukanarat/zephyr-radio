@@ -1,0 +1,6 @@
+name: zephyr-radio
+build:
+  cmake: .
+  kconfig: Kconfig
+  settings:
+    dts_root: .

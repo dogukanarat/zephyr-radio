@@ -1,0 +1,47 @@
+compatible: "da,sx1262-radio"
+description: Semtech SX1262 LoRa/FSK radio transceiver
+
+include:
+  - name: spi-device.yaml
+
+properties:
+    # Status is inherited, but often included for clarity
+    status:
+        type: string
+        required: true
+        default: "disabled"
+
+    nreset-gpios:
+        type: phandle-array
+        required: true
+        description: GPIO pin used for the hardware reset (nRESET)
+
+    busy-gpios:
+        type: phandle-array
+        required: true
+        description: GPIO pin used to signal BUSY state from the radio
+
+    dio1-gpios:
+        type: phandle-array
+        required: true
+        description: GPIO pin used for radio interrupts (DIO1)
+
+    dio2-gpios:
+        type: phandle-array
+        required: false
+        description: GPIO pin used for radio interrupts (DIO2)
+
+    xtal-sel-gpios:
+        type: phandle-array
+        required: false
+        description: GPIO pin used to select the crystal oscillator (XTAL)
+
+    freq-sel-gpios:
+        type: phandle-array
+        required: false
+        description: GPIO pin used to select the frequency band (FREQ_SEL)
+
+    antenna-switch-gpios:
+        type: phandle-array
+        required: false
+        description: Optional GPIO to enable/disable the RF switch or LNA
