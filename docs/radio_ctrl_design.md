@@ -8,36 +8,36 @@ The `radio_ctrl` module is a Zephyr RTOS driver for Semtech wireless transceiver
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Application Layer                         │
+│                    Application Layer                        │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                   radio_ctrl API (radio_ctrl.h)             │
-│  - Configuration (LoRa, GFSK, FLRC, LR-FHSS)               │
+│  - Configuration (LoRa, GFSK, FLRC, LR-FHSS)                │
 │  - TX/RX Operations                                         │
 │  - Statistics & Monitoring                                  │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                   RALF (Radio Abstraction Layer Framework)   │
+│                   RALF (Radio Abstraction Layer Framework)  │
 │  - ralf_sx126x, ralf_sx127x, ralf_sx128x, ralf_lr11xx       │
 │  - High-level radio parameter setup                         │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                   RAL (Radio Abstraction Layer)              │
+│                   RAL (Radio Abstraction Layer)             │
 │  - ral_sx126x, ral_sx127x, ral_sx128x, ral_lr11xx           │
 │  - Low-level radio command abstraction                      │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                   HAL (Hardware Abstraction Layer)           │
+│                   HAL (Hardware Abstraction Layer)          │
 │  - SPI communication                                        │
-│  - GPIO control (RESET, BUSY, IRQ)                         │
+│  - GPIO control (RESET, BUSY, IRQ)                          │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
