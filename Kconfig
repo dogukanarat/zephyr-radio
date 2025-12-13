@@ -6,7 +6,7 @@ menuconfig RADIO_CTRL
 if RADIO_CTRL
     config RADIO_CTRL_SX1262
         bool "DA SX1262 radio driver"
-        depends on SPI
+        depends on SPI && EVENTS
         default y if DT_HAS_YOURCO_SX1262_RADIO_ENABLED
         help
         Enable driver for SX1262-based radio using your custom API.

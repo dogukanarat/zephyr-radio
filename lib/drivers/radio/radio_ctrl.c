@@ -15,6 +15,15 @@ LOG_MODULE_REGISTER(radio_ctrl, CONFIG_RADIO_CTRL_LOG_LEVEL);
 #define RADIO_CTRL_THREAD_STACK_SIZE (2 * 1024)
 #define RADIO_CTRL_THREAD_PRIORITY   (K_PRIO_COOP(7))
 #define RADIO_CTRL_TIMEOUT_MS        (1000)
+#define RADIO_CTRL_TX_MSGQ_MAX_MSGS  (10)
+
+#define RADIO_CTRL_EVENT_TX_DONE      BIT(0)
+#define RADIO_CTRL_EVENT_RX_DONE      BIT(1)
+#define RADIO_CTRL_EVENT_RX_TIMEOUT   BIT(2)
+#define RADIO_CTRL_EVENT_RX_HDR_ERROR BIT(3)
+#define RADIO_CTRL_EVENT_RX_CRC_ERROR BIT(4)
+#define RADIO_CTRL_EVENT_CAD_DONE     BIT(5)
+#define RADIO_CTRL_EVENT_CAD_OK       BIT(6)
 
 struct radio_ctrl_msg {
     uint16_t size;
@@ -54,9 +63,6 @@ struct radio_ctrl_config {
 struct radio_ctrl_data {
     struct k_work irq_work;
     struct k_mutex mutex;
-    struct k_sem sem_tx_done;
-    struct k_sem sem_irq;
-    struct k_sem sem_cad_done;
     struct gpio_callback irq_cb_data;
     const struct device *dev;
     bool is_cad_enabled;
@@ -66,6 +72,9 @@ struct radio_ctrl_data {
     ralf_params_lora_cad_t cad_params;
     struct radio_ctrl_stats stats;
     sx126x_hal_context_t sx126x_hal_ctx;
+    struct k_event event;
+    struct radio_ctrl_msg msg_buffer[RADIO_CTRL_TX_MSGQ_MAX_MSGS];
+    struct k_msgq tx_msgq;
     bool is_configured;
     bool is_ralf_initialized;
     bool is_initialized;
@@ -83,7 +92,6 @@ sx126x_hal_status_t sx126x_hal_write(const void *context, const uint8_t *command
     int busy_state;
     int32_t busy_start = k_uptime_get_32();
 
-    LOG_DBG("BUSY pin state: %d", gpio_pin_get_dt(busy));
     do {
         busy_state = gpio_pin_get_dt(busy);
         if (busy_state == 0) {
@@ -122,7 +130,6 @@ sx126x_hal_status_t sx126x_hal_read(const void *context, const uint8_t *command,
     int busy_state;
     int32_t busy_start = k_uptime_get_32();
 
-    LOG_DBG("BUSY pin state: %d", gpio_pin_get_dt(busy));
     do {
         busy_state = gpio_pin_get_dt(busy);
         if (busy_state == 0) {
@@ -393,8 +400,19 @@ static int radio_ctrl_impl_transmit(const struct device *dev, const uint8_t *dat
 
     k_mutex_lock(&ctrl_data->mutex, K_FOREVER);
 
-    do
-    {
+    do {
+        if (size > RADIO_CTRL_MAX_MSG_SIZE) {
+            ret = -EINVAL;
+            LOG_ERR("Data size exceeds maximum limit: %d > %d", size, RADIO_CTRL_MAX_MSG_SIZE);
+            break;
+        }
+
+        if (!ctrl_data->is_configured) {
+            ret = -EACCES;
+            LOG_ERR("Radio is not configured");
+            break;
+        }
+
         timeout = ral_get_lora_time_on_air_in_ms(ral_from_ralf(&ctrl_data->radio),
                                                  &ctrl_data->tx_params.pkt_params,
                                                  &ctrl_data->tx_params.mod_params);
@@ -405,8 +423,7 @@ static int radio_ctrl_impl_transmit(const struct device *dev, const uint8_t *dat
 
         // set the radio to standby
         ral_status = ral_set_standby(ral_from_ralf(&ctrl_data->radio), RAL_STANDBY_CFG_RC);
-        if (RAL_STATUS_OK != ral_status)
-        {
+        if (RAL_STATUS_OK != ral_status) {
             ret = -1;
             LOG_ERR("Failed to set the radio to standby! Status: %08X", ret);
             break;
@@ -414,8 +431,7 @@ static int radio_ctrl_impl_transmit(const struct device *dev, const uint8_t *dat
 
         // set the lora modem parameters
         ral_status = ralf_setup_lora(&ctrl_data->radio, &lora_params);
-        if (RAL_STATUS_OK != ral_status)
-        {
+        if (RAL_STATUS_OK != ral_status) {
             ret = -1;
             LOG_ERR("Failed to setup the LoRa modem! Status: %08X", ret);
             break;
@@ -423,17 +439,15 @@ static int radio_ctrl_impl_transmit(const struct device *dev, const uint8_t *dat
 
         // set the dio irq parameters
         ral_status = ral_set_dio_irq_params(ral_from_ralf(&ctrl_data->radio), RAL_IRQ_TX_DONE);
-        if (RAL_STATUS_OK != ral_status)
-        {
+        if (RAL_STATUS_OK != ral_status) {
             ret = -1;
             LOG_ERR("Failed to set the DIO IRQ parameters! Status: %08X", ret);
             break;
         }
 
         // set the packet payload
-        ral_status = ral_set_pkt_payload(ral_from_ralf(&ctrl_data->radio), data , size);
-        if (RAL_STATUS_OK != ral_status)
-        {
+        ral_status = ral_set_pkt_payload(ral_from_ralf(&ctrl_data->radio), data, size);
+        if (RAL_STATUS_OK != ral_status) {
             ret = -1;
             LOG_ERR("Failed to set the packet payload! Status: %08X", ret);
             break;
@@ -442,30 +456,29 @@ static int radio_ctrl_impl_transmit(const struct device *dev, const uint8_t *dat
         switch_to_standby = true;
         // set the radio to transmit
         ral_status = ral_set_tx(ral_from_ralf(&ctrl_data->radio));
-        if (RAL_STATUS_OK != ral_status)
-        {
+        if (RAL_STATUS_OK != ral_status) {
             ret = -1;
             LOG_ERR("Failed to set the radio to transmit! Status: %08X", ret);
             break;
         }
 
-        ret = k_sem_take(&ctrl_data->sem_tx_done, K_MSEC(timeout));
-        if (ret < 0)
-        {
+        LOG_DBG("Transmitting... data size: %d, timeout: %d ms", size, timeout);
+
+        ret = k_event_wait(&ctrl_data->event, RADIO_CTRL_EVENT_TX_DONE, false,
+                           K_MSEC(timeout));
+        if (ret < 0) {
             ret = -ETIMEDOUT;
-            LOG_ERR("Transmit timeout!");
+            LOG_ERR("Transmit timeout");
             break;
         }
 
-        LOG_INF("Radio is in transmit mode for %u ms", timeout);
+        LOG_DBG("Transmit done!");
 
-    } while(0);
+    } while (0);
 
-    if (switch_to_standby)
-    {
+    if (switch_to_standby) {
         ral_status = ral_set_standby(ral_from_ralf(&ctrl_data->radio), RAL_STANDBY_CFG_RC);
-        if (RAL_STATUS_OK != ral_status)
-        {
+        if (RAL_STATUS_OK != ral_status) {
             ret = -1;
             LOG_ERR("Failed to set the radio to standby! Status: %08X", ret);
         }
@@ -481,10 +494,76 @@ static int radio_ctrl_impl_receive(const struct device *dev, uint8_t *data, size
 {
     struct radio_ctrl_data *ctrl_data = dev->data;
     int ret = 0;
+    ral_status_t ral_status;
+    bool switch_to_standby = false;
+    ralf_params_lora_t lora_params = {0};
 
     k_mutex_lock(&ctrl_data->mutex, K_FOREVER);
 
-    // TODO implement receive logic here using ctrl_data->modem_radio and ctrl_data->rx_params
+    do {
+        if (size < RADIO_CTRL_MAX_MSG_SIZE) {
+            ret = -EINVAL;
+            LOG_ERR("Data buffer size is too small: %d < %d", size, RADIO_CTRL_MAX_MSG_SIZE);
+            break;
+        }
+
+        if (!ctrl_data->is_configured) {
+            ret = -EACCES;
+            LOG_ERR("Radio is not configured");
+            break;
+        }
+
+        memcpy(&lora_params, &ctrl_data->rx_params, sizeof(ralf_params_lora_t));
+        lora_params.pkt_params.pld_len_in_bytes = RADIO_CTRL_MAX_MSG_SIZE;
+
+        // set the radio to standby
+        ral_status = ral_set_standby(ral_from_ralf(&ctrl_data->radio), RAL_STANDBY_CFG_RC);
+        if (RAL_STATUS_OK != ral_status) {
+            ret = -1;
+            LOG_ERR("Failed to set the radio to standby! Status: %08X", ret);
+            break;
+        }
+
+        // set the lora modem parameters
+        ral_status = ralf_setup_lora(&ctrl_data->radio, &lora_params);
+        if (RAL_STATUS_OK != ral_status) {
+            ret = -1;
+            LOG_ERR("Failed to setup the LoRa modem! Status: %08X", ret);
+            break;
+        }
+
+        // set the dio irq parameters
+        ral_status = ral_set_dio_irq_params(ral_from_ralf(&ctrl_data->radio),
+                                            RAL_IRQ_RX_DONE | RAL_IRQ_RX_TIMEOUT | RAL_IRQ_RX_CRC_ERROR |
+                                                RAL_IRQ_RX_HDR_ERROR);
+        if (RAL_STATUS_OK != ral_status) {
+            ret = -1;
+            LOG_ERR("Failed to set the DIO IRQ parameters! Status: %08X", ret);
+            break;
+        }
+
+        switch_to_standby = true;
+        // set the radio to receive
+        ral_status = ral_set_rx(ral_from_ralf(&ctrl_data->radio), timeout);
+        if (RAL_STATUS_OK != ral_status) {
+            ret = -1;
+            LOG_ERR("Failed to set the radio to receive! Status: %08X", ret);
+            break;
+        }
+
+        LOG_DBG("Receiving... timeout: %d ms", timeout);
+
+        ret = k_event_wait(&ctrl_data->event,
+                           RADIO_CTRL_EVENT_RX_DONE | RADIO_CTRL_EVENT_RX_TIMEOUT |
+                               RADIO_CTRL_EVENT_RX_CRC_ERROR | RADIO_CTRL_EVENT_RX_HDR_ERROR,
+                           false, K_MSEC(timeout + 100));
+        if (ret < 0) {
+            ret = -ETIMEDOUT;
+            LOG_ERR("Receive timeout");
+            break;
+        }
+
+
 
     k_mutex_unlock(&ctrl_data->mutex);
 
@@ -507,35 +586,112 @@ static const struct radio_ctrl_driver_api radio_ctrl_api = {
     .receive = radio_ctrl_impl_receive,
 };
 
-static void radio_ctrl_irq_isr(const struct device *port, struct gpio_callback *cb, uint32_t pins)
+static void radio_ctrl_rx_work(radio_ctrl_data *data)
 {
-    struct radio_ctrl_data *data = CONTAINER_OF(cb, struct radio_ctrl_data, irq_cb_data);
+    ral_status_t ral_status = RAL_STATUS_OK;
+    ral_lora_rx_pkt_status_t lora_rx_status = {0};
+    struct radio_ctrl_msg msg = {0};
 
-    k_work_submit(&data->irq_work);
+    do {
+        ral_status = ral_get_lora_rx_pkt_status(ral_from_ralf(&data->radio), &lora_rx_status);
+        if (RAL_STATUS_OK != ral_status) {
+            LOG_ERR("Failed to get the LoRa RX packet status! Status: %08X", ral_status);
+            break;
+        }
+
+        msg.stats.rssi_in_dbm = lora_rx_status.rssi_in_dbm;
+        msg.stats.snr_in_db = lora_rx_status.snr_in_db;
+        msg.stats.signal_rssi_in_dbm = lora_rx_status.signal_rssi_in_db
+
+        ral_status = ral_get_pkt_payload(ral_from_ralf(&data->radio), sizeof(msg.data), msg.data,
+                                        &msg.size);
+        if (RAL_STATUS_OK != ral_status) {
+            LOG_ERR("Failed to get the received payload! Status: %08X", ral_status);
+            break;;
+        }
+
+        if (k_msgq_put(&data->tx_msgq, &msg, K_NO_WAIT) != 0) {
+            LOG_WRN("RX message queue full, dropping packet");
+            break;
+        }
+
+        LOG_INF("Received packet: size=%d, rssi=%d dBm, snr=%d dB",
+                msg.size, lora_rx_status.rssi_in_dbm, lora_rx_status.snr_in_db);
+    } while(0);
 }
 
 static void radio_ctrl_irq_work(struct k_work *work)
 {
     struct radio_ctrl_data *data = CONTAINER_OF(work, struct radio_ctrl_data, irq_work);
-
-    // k_mutex_lock(&data->mutex, K_FOREVER);
+    ral_status_t ral_status = RAL_STATUS_OK;
+    ral_irq_t irq_status = RAL_IRQ_NONE;
 
     LOG_INF("Handling radio IRQ");
 
-    // Read IRQ status from SX1262
-    // uint16_t irq_status = sx1262_get_irq_status(...);
+    do {
+        ral_status = ral_get_and_clear_irq_status(ral_from_ralf(&data->radio), &irq_status);
+        if (RAL_STATUS_OK != ral_status) {
+            LOG_ERR("Failed to get and clear the IRQ status! Status: %08X", ral_status);
+            break;
+        }
 
-    // Handle IRQs: RX done, TX done, CAD done, errors, etc.
-    // Update data->stats accordingly
+        if (irq_status & RAL_IRQ_TX_DONE) {
+            LOG_INF("TX Done IRQ");
+            data->stats.irq.tx_done++;
+            k_event_post(&data->event, RADIO_CTRL_EVENT_TX_DONE);
+        }
+        if (irq_status & RAL_IRQ_RX_DONE) {
+            LOG_INF("RX Done IRQ");
+            data->stats.irq.rx_done++;
+            radio_ctrl_rx_work(data);
+            k_event_post(&data->event, RADIO_CTRL_EVENT_RX_DONE);
+        }
+        if (irq_status & RAL_IRQ_RX_TIMEOUT) {
+            LOG_INF("RX Timeout IRQ");
+            data->stats.irq.timeout++;
+            k_event_post(&data->event, RADIO_CTRL_EVENT_RX_TIMEOUT);
+        }
+        if (irq_status & RAL_IRQ_RX_HDR_ERROR) {
+            LOG_INF("RX Header Error IRQ");
+            data->stats.irq.hdr_error++;
+            k_event_post(&data->event, RADIO_CTRL_EVENT_RX_HDR_ERROR);
+        }
+        if (irq_status & RAL_IRQ_RX_CRC_ERROR) {
+            LOG_INF("RX CRC Error IRQ");
+            data->stats.irq.crc_error++;
+            k_event_post(&data->event, RADIO_CTRL_EVENT_RX_CRC_ERROR);
+        }
+        if (irq_status & RAL_IRQ_CAD_DONE) {
+            LOG_INF("CAD Done IRQ");
+            data->stats.irq.cad_done++;
+            k_event_post(&data->event, RADIO_CTRL_EVENT_CAD_DONE);
+        }
+        if (irq_status & RAL_IRQ_CAD_OK) {
+            LOG_INF("CAD OK IRQ");
+            data->stats.irq.cad_ok++;
+            k_event_post(&data->event, RADIO_CTRL_EVENT_CAD_OK);
+        }
 
-    // k_mutex_unlock(&data->mutex);
+        if (irq_status == RAL_IRQ_NONE) {
+            LOG_WRN("Spurious IRQ");
+            data->stats.irq.none++;
+        }
+
+    } while (0);
+}
+
+static void radio_ctrl_irq_isr(const struct device *port, struct gpio_callback *cb, uint32_t pins)
+{
+    struct radio_ctrl_data *data = CONTAINER_OF(cb, struct radio_ctrl_data, irq_cb_data);
+    k_work_submit(&data->irq_work);
 }
 
 static int radio_ctrl_init(const struct device *dev)
 {
     const struct radio_ctrl_config *cfg = dev->config;
     struct radio_ctrl_data *data = dev->data;
-    int ret;
+    ral_status_t ral_status = RAL_STATUS_OK;
+    int ret = 0;
 
     data->dev = dev;
 
@@ -547,19 +703,11 @@ static int radio_ctrl_init(const struct device *dev)
         return ret;
     }
 
-    ret = k_sem_init(&data->sem_tx_done, 0, 1);
+    k_event_init(&data->event);
+
+    ret = k_msgq_init(&data->tx_msgq, data->msg_buffer, sizeof(struct radio_ctrl_msg), RADIO_CTRL_TX_MSGQ_MAX_MSGS);
     if (ret < 0) {
-        LOG_ERR("Failed to initialize TX done semaphore");
-        return ret;
-    }
-    ret = k_sem_init(&data->sem_irq, 0, 1);
-    if (ret < 0) {
-        LOG_ERR("Failed to initialize IRQ semaphore");
-        return ret;
-    }
-    ret = k_sem_init(&data->sem_cad_done, 0, 1);
-    if (ret < 0) {
-        LOG_ERR("Failed to initialize CAD done semaphore");
+        LOG_ERR("Failed to initialize TX message queue");
         return ret;
     }
 
@@ -629,15 +777,11 @@ static int radio_ctrl_init(const struct device *dev)
         return ret;
     }
 
-    LOG_INF("SPI: bus=%s op=0x%08x freq=%u slave=%u cs_port=%p cs_pin=%d",
-        cfg->spi.bus->name,
-        cfg->spi.config.operation,
-        cfg->spi.config.frequency,
-        cfg->spi.config.slave,
-        (void *)cfg->spi.config.cs.gpio.port,
-        cfg->spi.config.cs.gpio.pin);
-
-    ral_init(ral_from_ralf(&data->radio));
+    ral_status = ral_init(ral_from_ralf(&data->radio));
+    if (RAL_STATUS_OK != ral_status) {
+        LOG_ERR("Failed to initialize RAL! Status: %08X", ral_status);
+        return -EIO;
+    }
 
     LOG_INF("SX1262 radio initialized");
 
