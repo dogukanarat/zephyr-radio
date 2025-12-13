@@ -20,4 +20,19 @@ if RADIO_CTRL
         default 90
         help
         Set the initialization priority for the radio controller driver.
+    config RADIO_CTRL_MAX_MSG_SIZE
+        int "Radio controller driver maximum message size"
+        default 256
+        help
+        Set the maximum message size (in bytes) for the radio controller driver.
+    config RADIO_CTRL_TIMEOUT_MS
+        int "Radio controller driver timeout in milliseconds"
+        default 1000
+        help
+        Set the timeout duration (in milliseconds) for radio operations.
+    config RADIO_CTRL_RX_MSGQ_MAX_MSGS
+        int "Radio controller driver maximum RX message queue size"
+        default 10
+        help
+        Set the maximum number of messages in the RX message queue for the radio controller driver.
 endif # RADIO_CTRL

@@ -1,5 +1,5 @@
-compatible: "da,sx1262-radio"
-description: Semtech SX1262 LoRa/FSK radio transceiver
+compatible: "da,sx126x-radio"
+description: Semtech SX126x LoRa/FSK radio transceiver
 
 include:
   - name: spi-device.yaml
