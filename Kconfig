@@ -22,7 +22,7 @@ if RADIO_CTRL
         Set the initialization priority for the radio controller driver.
     config RADIO_CTRL_MAX_MSG_SIZE
         int "Radio controller driver maximum message size"
-        default 256
+        default 255
         help
         Set the maximum message size (in bytes) for the radio controller driver.
     config RADIO_CTRL_TIMEOUT_MS

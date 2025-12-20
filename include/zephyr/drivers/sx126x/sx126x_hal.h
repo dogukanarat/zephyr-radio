@@ -75,12 +75,11 @@ typedef enum sx126x_hal_status_e
 
 typedef struct
 {
-    void* spi;
-    void* busy_pin;
-    void* nreset_pin;
+    const void* spi;
+    const void* busy_pin;
+    const void* nreset_pin;
     uint32_t timeout;
 } sx126x_hal_context_t;
-
 
 /*
  * -----------------------------------------------------------------------------
